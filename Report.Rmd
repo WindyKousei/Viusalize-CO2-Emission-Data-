@@ -1,0 +1,648 @@
+---
+title: "IDVI Final Term Report"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    css: ./report.css
+    highlight: pygments
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+date: "2023-05-10"
+---
+
+# Exploring vehicle-related factors contributing to Canada CO2 emissions
+# Course: IDVI333677_22_2_01
+# Instructor: ThS. Lê Quang Thái
+
+| Group 2 | Student ID |
+|---|---|
+| Đỗ Hoàng Thịnh | 20133122 |
+| Nguyễn Minh Tiến | 20133093 |
+| Huỳnh Nguyễn Tín | 20133094 |
+| Bùi Lê Hải Triều | 20133101 |
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set()
+```
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+library(vip)
+library(caret)
+library(plotly)
+library(GGally)
+library(ranger)
+library(parsnip)
+library(viridis)
+library(treemap)
+library(d3treeR)
+library(reshape2)
+library(tidyverse)
+library(hrbrthemes)
+```
+
+### 1. Dataset
+
+Sử dụng dữ liệu thu thập trong 7 năm bởi chính phủ Canada ([Canada Government official link](https://open.canada.ca/data/en/dataset/98f1a129-f628-4ce4-b24d-6f16bf24dd64#wb-auto-6)), được tổng hợp bởi người dùng Kaggle, Debajyoti Podder, và đăng tải trên cộng đồng Kaggle ([Kaggle official link](https://www.kaggle.com/datasets/debajyotipodder/co2-emission-by-vehicles)).  
+Dataset trên mô tả chi tiết thông số kỹ thuật cơ bản của các phương tiện như mức tiêu hao nhiên liệu và lượng khí C02 thải ra, mục đích chính của bài nghiên cứu này là tìm hiểu về mối tương quan trên và trực quan hóa dữ liệu.
+
+#### 1.1. Variables
+
+| Name | Description |
+|---|---|
+| Model | 4WD/4X4 = Four-wheel drive<br>AWD = All-wheel drive<br>FFV = Flexible-fuel vehicle<br>SWB = Short wheelbase<br>LWB = Long wheelbase<br>EWB = Extended wheelbase |
+| Transmission | A = Automatic<br>AM = Automated manual<br>AS = Automatic with select shift<br>AV = Continuously variable<br>M = Manual<br>3 - 10 = Number of gears |
+| Fuel type | X = Regular gasoline<br>Z = Premium gasoline<br>D = Diesel<br>E = Ethanol (E85)<br>N = Natural gasoline |
+| FuelConsumptionCity | City fuel consumption ratings (L/100 km) |
+| FuelConsumptionHwy | Highway fuel consumption ratings (L/100km) |
+| FuelConsumptionComb | Combined rating (55% city, 45% hwy) (L/100km) |
+| FuelConsumptionCombMpg | Combined rating (55% city, 45% hwy) (mpg) |
+| CO2 emissions | Tailpipe emissions of CO2 (g/km) |
+
+#### 1.2. Preview
+
+```{r}
+co2_emissions <- read.csv("./data/dataset.csv")
+```
+
+```{r}
+str(co2_emissions)
+```
+
+Ta có thể thấy dataset có 7385 quan sát và 12 biến và các kiểu biến như sau:  
+- Kiểu chuỗi (categorical): $Make, $Model, $VehicleClass, $Transmission, $FuelType  
+- Kiểu thập phân (numerical): $EngineSize, $FuelConsumptionCity, $FuelConsumptionHwy, $FuelConsumptionComb  
+- Kiểu số nguyên (numerical): $Cylinders, $FuelConsumptionCombMpg, $CO2Emissions
+
+```{r}
+head(co2_emissions)
+```
+
+```{r}
+tail(co2_emissions)
+```
+
+```{r}
+sample_n(co2_emissions, 6)
+```
+
+### 2. Agenda
+
+#### 2.1. Asking questions
+
+Dựa vào dataset, ta có thể thấy mức tiêu hao nhiên liệu và lượng CO2 thải ra từ phương tiện phụ thuộc vào lẫn nhau hoặc vào nhiều yếu tố khác nhau. Nhóm đã đưa ra những giả thiết sau:
+
+##### Theory 1:
+Các phương tiện thuộc kiểu SUV với trọng lượng lớn hơn sẽ tiêu hao nhiên liệu hơn, dẫn đến lượng CO2 thải ra nhiều hơn so với các phương tiện khác.  
+X: VehicleClass  
+Y: CO2Emissions | FuelConsumptionComb
+
+##### Theory 2:
+Loại nhiên liệu đóng vai trờ tác động trực tiếp đến mức tiêu hao nhiên liệu và lượng CO2 thải ra, vì mỗi loại nhiên liệu có loại phản ứng đốt cháy khác nhau.  
+X: FuelType  
+Y: CO2Emissions | FuelConsumptionComb
+
+##### Theory 3:
+Động cơ càng lớn sẽ càng tiêu hao nhiên liệu hơn vì các mẫu siêu xe có phân khối rất lớn.  
+X: EngineSize | Cylinders  
+Y: CO2Emissions | FuelConsumptionComb
+
+Tổng quan, các biến kết quả là:  
+- FuelConsumptionCity  
+- FuelConsumptionHwy  
+- FuelConsumptionComb  
+- FuelConsumptionCombMpg  
+- CO2Emissions  
+Và các biến giải thích (đầu vào) là:  
+- Make  
+- Model  
+- VehicleClass  
+- EngineSize  
+- Cylinders  
+- Transmission  
+- TransmissionType  
+- FuelType
+
+#### 2.2. Our approach
+
+Nhóm sẽ cung cấp một ánh nhìn tổng quan và sâu sắc hơn về dataset thông qua quá trình trực quan hóa, phân tích dataset để kiểm tra giả thiết, hoặc sử dụng phương pháp học máy để tìm ra các xu hướng, khuôn mẫu, và dự đoán các biến kết quả nếu có thể.  
+
+Một phương pháp nhóm tin rằng sẽ là một công cụ quan trọng là đặt câu hỏi và tìm câu trả lời sử dụng các kỹ thuật trực quan hóa và học máy đã được học. Công đoạn này có thể như sau:  
+- Đặt giả thiết  
+- Biến đổi dữ liệu, trực quan hóa, hoặc mô hình hóa dataset trong phạm vi giả thiết  
+- Kết quả có thể không như mong đợi, nhưng có thể xác thực và đảm bảo tính đúng đắn của kết luận  
+
+Ngoài ra, nhóm dự kiến sẽ giữa mức tiêu hao nhiên liệu và lượng CO2 thải ra của các nhóm so sánh sau:  
+- Các phương tiện thuộc lớp SUV, TRUCK với các lớp còn lại  
+- Các phương tiện có kiểu truyền động tự động và số sàn  
+- Các phương tiện có khối động cơ lớn hơn trung bình và số còn lại  
+- Các loại nhiên liệu khác nhau trên các phương tiện cùng lớp, cùng phân khối, hoặc cùng kiểu truyền động
+
+### 3. Exploratory Data Analysis
+
+#### 3.1. Understanding the dataset
+
+Để có thể hiểu rõ hơn về các biến kiểu dữ liệu phân loại (categorical data), ta sẽ đếm số lần xuất hiện các giá trị unique của từng biến trong quan sát.  
+Bắt đầu với hãng sản xuất xe.
+
+```{r}
+plot <- ggplot(
+  co2_emissions %>%
+    count(Make) %>%
+    mutate(Text = paste("Make: ", Make, "\nNumber of obs.: ", n, sep = "")),
+  aes(x = Make, y = n, size = n, color = Make, text = Text)
+) +
+  geom_point(alpha = 0.7) +
+  scale_size(range = c(1, 20), name = "Number of obs.") +
+  scale_color_viridis(discrete = TRUE, guide = FALSE) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90)) +
+  labs(x = "Make", y = "Number of obs.")
+
+ggplotly(plot, tooltip = "Text")
+```
+
+Có 42 nhà sản xuất xe tại Canada. Với FORD, CHEVROLET, BMW, MERCEDES-BENZ, và PORSCHE lần lượt là 5 nhà sản xuất phổ biến nhất tại Canada.  
+Ta hãy xem 10 mẫu xe của hãng FORD được sử dụng nhiều nhất.
+
+```{r fig.width=10}
+ggplot(
+  head(
+    co2_emissions %>%
+      group_by(Make, Model) %>%
+      summarise(n = n(), .groups = "drop") %>%
+      filter(Make == "FORD") %>%
+      arrange(desc(n)) %>%
+      select(Model, n),
+    10
+  ),
+  aes(x = n, y = reorder(Model, n))
+) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = n), vjust = 0.35, hjust = -0.2) +
+  theme_light() +
+  labs(title = "Top 10 FORD models", x = "Number of obs.", y = "Model")
+```
+
+Ta cũng sẽ xem 20 mẫu xe được sử dụng rộng rãi nhất tại Canada cùng với hãng xe sản xuất mẫu xe đó.
+
+```{r}
+head(
+  co2_emissions %>%
+    group_by(Model, Make) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    arrange(desc(n)),
+  20
+)
+```
+
+Đáng chú ý, ta có thể thấy 6 mẫu xe xuất hiện nhiều nhất đều thuộc hãng FORD, ủng hộ phát hiện FORD là hãng xe phổ biến nhất tại Canada.  
+Tiếp theo là phân lớp xe.
+
+```{r}
+plot <- ggplot(
+  co2_emissions %>%
+    count(VehicleClass) %>%
+    mutate(Text = paste("Vehicle class: ", VehicleClass, "\nNumber of obs.: ", n, sep = "")),
+  aes(x = n, y = VehicleClass, size = n, color = VehicleClass, text = Text)
+) +
+  geom_point(alpha = 0.7) +
+  scale_size(range = c(1, 20), name = "Number of obs.") +
+  scale_color_viridis(discrete = TRUE, guide = FALSE) +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Number of obs.", y = "Vehicle class")
+
+ggplotly(plot, tooltip = "Text")
+```
+
+Lớp xe SUV - SMALL được sử dụng nhiều nhất tại Canada, theo sau là lớp MID-SIZE và COMPACT.  
+Tiếp theo là loại truyền động.
+
+```{r}
+co2_emissions %>%
+  count(Transmission, sort = TRUE)
+```
+
+Các loại truyền động có sẵn trong dataset không chỉ đơn thuần là số sàn (Manual - M) hoặc tự động (Automatic - A), nên ta sẽ tạo một biến TransmissionType để dễ xác định và phân loại hai loại trên từ cột Transmission.  
+Từ đó, đếm số lần xuất hiện của hai giá trị "A" và "M".
+
+```{r}
+co2_emissions <- co2_emissions %>%
+  mutate(TransmissionType = substring(Transmission, 1, 1))
+
+co2_emissions %>%
+  count(TransmissionType)
+```
+
+```{r}
+group <- c(rep("Automatic", 24), rep("Manual", 3))
+d3tree2(
+  treemap(
+    data.frame(
+      group,
+      co2_emissions %>%
+        count(Transmission) %>%
+        arrange(Transmission)
+    ),
+    index = c("group", "Transmission"),
+    vSize = "n",
+    type = "index",
+    palette = "Set3",
+    title = "Transmission"
+  ),
+  rootname = "Transmission"
+)
+```
+
+Mẫu xe có kiểu truyền động tự động (Automatic - A) chiếm ưu thế hơn hẳn so với số sàn (Manual - M).  
+Tiếp theo là loại nhiên liệu.
+
+```{r}
+co2_emissions %>%
+  count(FuelType, sort = TRUE)
+```
+
+Các loại nhiên liệu có sẵn trong dataset là ký hiệu, để đồ thị user-friendly hơn thì ta sẽ thay đổi tên cho các loại nhiên liệu này dựa trên đặc tả về cột FuelType ở mục 1.1.  
+Từ đó, đếm số lần xuất hiện của từng giá trị unique trong cột.
+
+```{r}
+ggplot(
+  co2_emissions %>%
+    mutate(FuelType = case_when(
+      FuelType == "X" ~ "Regular Gasoline",
+      FuelType == "Z" ~ "Premium Gasoline",
+      FuelType == "D" ~ "Diesel",
+      FuelType == "E" ~ "Ethanol (E85)",
+      TRUE ~ "Natural Gasoline"
+    )) %>%
+    count(FuelType),
+  aes(reorder(x = FuelType, -n), y = n)
+) +
+  geom_col(width = 0.5) +
+  geom_text(aes(label = n), vjust = -0.25) +
+  theme_light() +
+  labs(x = "Fuel Type", y = "Number of obs.")
+```
+
+Loại nhiên liệu Regular Gasoline và Premium Gasoline là hai loại nhiên liệu phổ biến nhất được dùng cho các phương tiện tại Canada, với số quan sát cách biệt lớn hơn đáng kể so với các loại nhiên liệu khác.
+
+#### 3.2. Identifying correlated variables
+
+Nhóm dự đoán rằng mức tiêu hao nhiên liệu và lượng CO2 thải ra của các phương tiện tại Canada có thể phụ thuộc vào nhiều biến số như loại nhiên liệu sử dụng, phân lớp xe, kích cỡ động cơ,...  
+Mục này sẽ tập trung vào việc phân tích và xác định những khuôn mẫu, xu hướng, hoặc tương quan giữa các biến trong dataset.  
+Bắt đầu với các biến kiểu số.
+
+```{r fig.width=15}
+co2_emissions %>%
+  select(EngineSize, Cylinders, FuelConsumptionComb, CO2Emissions) %>%
+  ggpairs(progress = FALSE)
+```
+
+```{r}
+melted_corr_map <-
+  melt(cor(
+    co2_emissions[sapply(co2_emissions, is.numeric)] %>%
+      select(EngineSize, Cylinders, FuelConsumptionComb, CO2Emissions)
+  ))
+
+ggplot(
+  melted_corr_map,
+  aes(x = Var1, y = Var2, fill = value)
+) +
+  geom_tile() +
+  geom_text(aes(Var1, Var2, label = round(value, 3)), size = 4) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90)) +
+  theme(axis.title = element_blank())
+```
+
+**Dựa vào ma trận tương quan và heatmap trên, ta có thể đưa ra một số kết luận sơ bộ:**  
+Khi tăng kích cỡ động cơ (EngineSize):  
+→ Số lượng xi lanh tăng  
+→ Mức tiêu hao nhiên liệu đường hỗn hợp (FuelConsumptionComb) tăng  
+→ Lượng CO2 thải ra cũng tăng  
+Và các biến này đều tác động tuyến tính lẫn nhau.
+
+Quan trọng hơn hết, ta cũng có thể đưa ra kết luận rằng nếu một phương tiện có mức tiêu hao nhiên liệu cao, lượng CO2 thải ra cũng tăng tuyến tính với mức độ tương quan 0.918.
+
+##### 3.3. Hypothesis testing
+
+##### Theory 1:
+Các phương tiện thuộc kiểu SUV với trọng lượng lớn hơn sẽ tiêu hao nhiên liệu hơn, dẫn đến lượng CO2 thải ra nhiều hơn so với các phương tiện khác.  
+X: VehicleClass  
+Y: CO2Emissions | FuelConsumptionComb
+
+Bắt đầu với việc xem mối tương quan giữa mức tiêu hao nhiên liệu và lượng CO2 thải ra của từng phân lớp xe.
+
+```{r fig.width=15}
+ggplot(
+  co2_emissions,
+  aes(x = FuelConsumptionComb, y = CO2Emissions)
+) +
+  geom_point() +
+  facet_wrap(~VehicleClass) +
+  theme_light()
+```
+
+Để dễ so sánh hơn, ta sẽ vẽ biểu đồ điểm và phân biệt các Vehicle Class theo màu.
+
+```{r fig.width=10}
+ggplot(
+  co2_emissions,
+  aes(x = FuelConsumptionComb, y = CO2Emissions, color = VehicleClass)
+) +
+  geom_point(alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE) +
+  theme_light()
+```
+
+Do có sự tương quan mạnh, ta có thể bước đầu tin rằng giả thiết có ý nghĩa để tiếp tục.
+
+```{r fig.width=15}
+ggplot(
+  co2_emissions,
+  aes(x = FuelConsumptionComb, fill = VehicleClass, color = VehicleClass)
+) +
+  geom_histogram(aes(y = after_stat(density)),
+    bins = 29,
+    alpha = 0.4,
+    position = "identity"
+  ) +
+  geom_density(
+    alpha = 0.1,
+    linetype = "dashed"
+  ) +
+  scale_color_viridis(discrete = TRUE) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme_light()
+```
+
+Mặc dù đồ thị phân bố không đưa ra kết quả trực quan thật sự rõ, ta vẫn có thể nhận thấy hai phân lớp VAN - CARGO và VAN - PASSENGER có mức tiêu hao cao nhất do có phân bố lệch trái.  
+Tiếp theo, ta sẽ so sánh mức nhiên liệu tiêu hao trung bình theo phân lớp xe.
+
+```{r, fig.width=10}
+ggplot(
+  co2_emissions %>%
+    group_by(VehicleClass) %>%
+    summarise(mean = mean(CO2Emissions), .groups = "drop"),
+  aes(x = mean, y = reorder(VehicleClass, mean))
+) +
+  geom_col(width = 0.6) +
+  theme_light() +
+  labs(title = "Mean CO2 emissions per vehicle class", x = "Mean CO2 emissions", y = "Vehicle class")
+```
+
+STATION WAGON - SMALL, COMPACT, và MID-SIZE là ba phân lớp xe có mức tiêu hao nhiên liệu trung bình thấp nhất.  
+Theo như dự đoán, mẫu xe SUV có trọng lượng lớn cần sử dụng nhiên liệu nhiều hơn nên trên trung bình có lượng CO2 thải ra cao hơn các phương tiện nhỏ gọn. Giả thiết 1 được nhóm nhận diện đúng.
+
+##### Theory 2:
+Loại nhiên liệu đóng vai trờ tác động trực tiếp đến mức tiêu hao nhiên liệu và lượng CO2 thải ra, vì mỗi loại nhiên liệu có loại phản ứng đốt cháy khác nhau.  
+X: FuelType  
+Y: CO2Emissions | FuelConsumptionComb
+
+```{r fig.width=10}
+ggplot(
+  co2_emissions %>%
+    mutate(FuelType = case_when(
+      FuelType == "X" ~ "Regular Gasoline",
+      FuelType == "Z" ~ "Premium Gasoline",
+      FuelType == "D" ~ "Diesel",
+      FuelType == "E" ~ "Ethanol (E85)",
+      TRUE ~ "Natural Gasoline"
+    )) %>%
+    group_by(FuelType),
+  aes(x = FuelConsumptionComb, y = CO2Emissions, color = FuelType)
+) +
+  geom_point() +
+  scale_color_viridis(discrete = TRUE) +
+  theme_light()
+```
+
+Các điểm có độ dốc rõ rệt giữa mức tiêu hao nhiên liệu và lượng CO2 thải ra. Ta có thể nói rằng một phương tiện sử dụng nhiên liệu càng nhiều thì lượng khí thải càng tăng.  
+Ngoài ra, Ethanol là loại nhiên liệu có độ dốc thấp nhất, cho thấy lượng CO2 thải ra ít hơn khi so sánh hai phương tiện có cùng mức tiêu hao nhiên liệu nhưng sử dụng loại nhiên liệu khác nhau. Ngược lại, Diesel là loại nhiên liệu có độ dốc cao nhất.
+
+```{r fig.width=15}
+ggplot(
+  subset(co2_emissions, FuelType != "N") %>%
+    mutate(FuelType = case_when(
+      FuelType == "X" ~ "Regular Gasoline",
+      FuelType == "Z" ~ "Premium Gasoline",
+      FuelType == "D" ~ "Diesel",
+      FuelType == "E" ~ "Ethanol (E85)"
+    )) %>%
+    group_by(FuelType),
+  aes(x = CO2Emissions, color = FuelType, fill = FuelType)
+) +
+  geom_histogram(aes(y = after_stat(density)),
+    bins = 26,
+    alpha = 0.4,
+    position = "identity"
+  ) +
+  geom_density(
+    alpha = 0.1,
+    linetype = "dashed"
+  ) +
+  scale_color_viridis(discrete = TRUE) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme_light()
+```
+
+Đồ thị phân bố cho thấy phương tiện sử dụng loại nhiên liệu Regular Gasoline có lượng CO2 thải ra thấp hơn so với các phương tiện sử dụng loại nhiên liệu khác.  
+Ta sẽ so sánh mức tiêu hao nhiên liệu trung bình theo loại nhiên liệu.
+
+```{r fig.width=10}
+ggplot(
+  subset(co2_emissions, FuelType != "N") %>%
+    mutate(FuelType = case_when(
+      FuelType == "X" ~ "Regular Gasoline",
+      FuelType == "Z" ~ "Premium Gasoline",
+      FuelType == "D" ~ "Diesel",
+      FuelType == "E" ~ "Ethanol (E85)"
+    )) %>%
+    group_by(FuelType) %>%
+    summarise(mean = mean(CO2Emissions), .groups = "drop"),
+  aes(x = mean, y = reorder(FuelType, mean))
+) +
+  geom_col(width = 0.6) +
+  theme_light() +
+  labs(title = "Mean CO2 emissions per fuel type", x = "Mean CO2 emissions", y = "Fuel type")
+```
+
+Phương tiện sử dụng loại nhiên liệu Ethanol có lượng CO2 thải ra cao nhất. Đồng thời, dựa vào mối tương quan giữa lượng CO2 thải ra và mức tiêu hao nhiên liệu, phương tiện sử dụng Ethanol có mức tiêu hao nhiên liệu cũng nhiều hơn.  
+Ngoài ra, việc sử dụng nhiên liệu Premium Gasoline cũng cho thấy lượng CO2 thải ra và mức tiêu hao nhiên liệu cao hơn so với Diesel và Regular Gasoline.  
+Vì vậy, ta không thể bác bỏ giả thiết 2 đã đề ra, lượng CO2 thải ra và mức tiêu hao nhiên liệu có thể bị tác động bởi loại nhiên liệu phương tiện sử dụng, sự khác biệt có thể thấy rõ ràng nhất là khi so sánh giữa Ethanol và các loại còn lại.
+
+### 4. Machine Learning
+
+Từ các quan sát trên, ta sẽ bắt đầu dựng mô hình dự đoán dựa trên các phương pháp phổ biến, kiểm chứng mức độ chính xác của mô hình, và tìm ra biến có ý nghĩa nhất.
+
+##### 4.1. Predicting CO2 emissions
+
+Biến kết quả:  
+- CO2Emissions  
+Biến giải thích:  
+- Make  
+- Model  
+- VehicleClass  
+- EngineSize  
+- Cylinders  
+- Transmission  
+- TransmissionType  
+- FuelType  
+- FuelConsumptionHwy  
+- FuelConsumptionCity  
+- FuelConsumptionComb  
+- FuelConsumptionCombMpg
+
+Đầu tiên, dựng mô hình train và test, mô hình train sẽ sử dụng 75% quan sát bên trong dataset.
+
+```{r}
+target <- round(nrow(co2_emissions) * 0.75)
+vt <- runif(nrow(co2_emissions) * 0.75)
+co2_emissions_train <- co2_emissions[vt < 0.75, ]
+co2_emissions_test <- co2_emissions[vt >= 0.75, ]
+```
+
+```{r}
+rf_model <- ranger(CO2Emissions ~ .,
+  co2_emissions_train,
+  num.trees = 5000,
+  respect.unordered.factors = "order",
+  seed = set.seed(1608)
+)
+
+rf_model
+```
+
+Lưu ý: mô hình dự đoán hiện tại có kiểu hồi quy vì hàm ranger tự động chọn dựa vào kiểu biến kết quả là kiểu số hay phân loại, trong trường hợp này, biến kết quả có kiểu số nên mô hình dự đoán có kiểu hồi quy.
+
+Sau khi dựng mô hình dự đoán sử dụng Random Forest có 5000 decision trees sử dụng 5504 quan sát (75%) từ dataset, ta có thể thử dự đoán trên mô hình test và tính toán thông số RMSE của kết quả dự đoán được tạo.
+
+```{r}
+co2_emissions_test$pred <- predict(rf_model, co2_emissions_test)$prediction
+co2_emissions_test %>%
+  mutate(Residual = CO2Emissions - pred) %>%
+  summarise(rmse = sqrt(mean(Residual^2)))
+```
+
+Để kiểm tra mức độ chính xác của mô hình dự đoán, ta sẽ sử dụng đồ thị scatter plot để so sánh giữa lượng CO2 thải ra thực và lượng CO2 thải ra dự đoán.
+
+```{r fig.width=10}
+ggplot(
+  co2_emissions_test,
+  aes(x = pred, y = CO2Emissions)
+) +
+  geom_point() +
+  geom_abline() +
+  theme_light()
+```
+
+Tiếp theo là xác định các biến có ý nghĩa nhất trong việc dự đoán lượng CO2 thải ra.
+
+```{r fig.width=10}
+rand_forest(mode = "regression") %>%
+  set_engine("ranger", importance = "impurity") %>%
+  fit(CO2Emissions ~ ., co2_emissions_train) %>%
+  vip(aesthetic = list()) +
+  theme_light()
+```
+
+Dựa vào đồ thị trên, mức tiêu hao năng lượng có ảnh hưởng lớn nhất đến kết quả dự đoán lượng CO2 thải ra của mô hình dự đoán Random Forest, trong khi mẫu xe có ảnh hưởng thấp nhất. Điều này cũng dễ hiểu, khi một phương tiện có mức tiêu hao nhiên liệu cao, lượng khí CO2 thải ra môi trường cũng sẽ tăng.  
+Đáng lưu ý rằng kích cỡ động cơ (EngineSize) và số xi lanh (Cylinders) cũng là biến có ảnh hưởng cao không liên quan đến mức tiêu hao nhiên liệu.
+
+##### 4.2. Predicting fuel consumption
+
+Tiếp theo là dự đoán mức tiêu hao nhiên liệu.
+
+Biến kết quả:  
+- FuelConsumptionComb  
+Biến giải thích:  
+- Make  
+- Model  
+- VehicleClass  
+- EngineSize  
+- Cylinders  
+- Transmission  
+- TransmissionType  
+- FuelType
+
+Đầu tiên, dựng mô hình train và test, mô hình train sẽ sử dụng 75% quan sát bên trong dataset.
+
+```{r}
+target <- round(nrow(co2_emissions) * 0.75)
+vt <- runif(nrow(co2_emissions) * 0.75)
+fuel_comb_train <- co2_emissions[vt < 0.75, ]
+fuel_comb_test <- co2_emissions[vt >= 0.75, ]
+```
+
+```{r}
+seed <- set.seed(1608)
+rf_model <- ranger(
+  FuelConsumptionComb ~
+    Make +
+    Model +
+    VehicleClass +
+    EngineSize +
+    Cylinders +
+    Transmission +
+    TransmissionType +
+    FuelType,
+  fuel_comb_train,
+  num.trees = 5000,
+  respect.unordered.factors = "order",
+  seed = seed
+)
+
+rf_model
+```
+
+Lưu ý: mô hình dự đoán hiện tại có kiểu hồi quy vì hàm ranger tự động thực hiện dựa vào kiểu kết quả dự đoán là kiểu số hoặc phân loại, trong trường hợp này, biến kết quả có kiểu số nên mô hình dự đoán có kiểu hồi quy.
+
+Sau khi dựng xong mô hình dự đoán sử dụng Random Forest có 5000 decision trees, ta có thể thử dự đoán trên mẫu test và tính toán thông số RMSE của kết quả dự đoán được tạo.
+
+```{r}
+fuel_comb_test$pred <- predict(rf_model, fuel_comb_test)$prediction
+fuel_comb_test %>%
+  mutate(Residual = FuelConsumptionComb - pred) %>%
+  summarise(rmse = sqrt(mean(Residual^2)))
+```
+
+Để kiểm tra mức độ chính xác của mô hình dự đoán, ta sẽ sử dụng đồ thị scatter plot để so sánh giữa mức tiêu hao nhiên liệu thực và mức tiêu hao nhiên liệu được dự đoán.
+
+```{r fig.width=10}
+ggplot(fuel_comb_test, aes(pred, FuelConsumptionComb)) +
+  geom_point() +
+  geom_abline() +
+  theme_light()
+```
+
+Cuối cùng, ta có thể xem các biến có ý nghĩa nhất trong việc dự đoán mức tiêu hao nhiên liệu của các phương tiện.
+
+```{r fig.width=10}
+rand_forest(mode = "regression") %>%
+  set_engine("ranger", importance = "impurity") %>%
+  fit(
+    FuelConsumptionComb ~
+      Make +
+      Model +
+      VehicleClass +
+      EngineSize +
+      Cylinders +
+      Transmission +
+      TransmissionType +
+      FuelType,
+    fuel_comb_train
+  ) %>%
+  vip(aesthetic = list()) +
+  theme_light()
+```
+
+Dựa vào đồ thị trên, kích cỡ động cơ có ảnh hưởng lớn nhất trong mô hình dự đoán mức tiêu hao năng lượng của các phương tiện.
+
+#### References
+
+Muktapathak. (2021, November 11). Prediction using random forest model. Kaggle. Retrieved December 20, 2022, from https://www.kaggle.com/code/muktapathak/prediction-using-random-forest-model  
+Kevinkwan. (2022, April 23). Vehicle Emissions Eda. Kaggle. Retrieved December 20, 2022, from https://www.kaggle.com/code/kevinkwan/vehicle-emissions-eda
